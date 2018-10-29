@@ -19,8 +19,8 @@ class Game(object):
         self.opt_r = opt_r
 
     def step(self, samples):
-        # y = self.sender(samples[:, 0])
-        scores = self.receiver(samples)
+        y = self.sender(samples[:, 0])
+        scores = self.receiver(samples, y)
 
         self.opt_s.zero_grad()
         self.opt_r.zero_grad()
@@ -45,7 +45,7 @@ class Sender(nn.Module):
         self.net = Net(nout=1) # unused for now
 
     def forward(self, positive):
-        return torch.randint(0, 10, size=(positive.shape[0],))
+        return torch.randint(0, 10, size=(positive.shape[0],)).long()
 
 
 class Receiver(nn.Module):
@@ -53,12 +53,39 @@ class Receiver(nn.Module):
         super(Receiver, self).__init__()
         self.net = net
 
-    def forward(self, samples):
+    def forward(self, samples, labels):
         nsamples = samples.shape[1]
         samples = samples.view(-1, *samples.shape[2:])
-        logit = self.net(samples)
+        logit = self.net(samples, labels)
         ydist = logit.view(-1, nsamples)
         return ydist
+
+
+class EmbedNet(nn.Module):
+    def __init__(self, nout, embed_dim=50):
+        super(EmbedNet, self).__init__()
+        self.conv1 = nn.Conv2d(1, 10, kernel_size=5)
+        self.conv2 = nn.Conv2d(10, 20, kernel_size=5)
+        self.conv2_drop = nn.Dropout2d()
+        self.fc1 = nn.Linear(320, 50)
+        self.fc2 = nn.Linear(50 + embed_dim, nout)
+        self.embed = nn.Embedding(10, embed_dim)
+
+        self.nout = nout
+
+    def forward(self, x, y):
+        x = F.relu(F.max_pool2d(self.conv1(x), 2))
+        x = F.relu(F.max_pool2d(self.conv2_drop(self.conv2(x)), 2))
+        x = x.view(-1, 320)
+        x = self.fc1(x)
+        e = self.embed(y)
+        # TODO: Remove contiguous. Be more clever.
+        e = e.unsqueeze(1).expand(e.shape[0], x.shape[0]//e.shape[0], e.shape[1]).contiguous().view(x.shape[0], -1)
+        x = torch.cat([x, e], 1)
+        x = F.relu(x)
+        x = F.dropout(x, training=self.training)
+        x = self.fc2(x)
+        return x
 
 
 class Net(nn.Module):
@@ -80,6 +107,7 @@ class Net(nn.Module):
         x = F.dropout(x, training=self.training)
         x = self.fc2(x)
         return x
+
 
 def train(args, model, device, train_loader, optimizer, epoch):
     model.train()
@@ -186,7 +214,7 @@ def main():
 
 
     sender = Sender()
-    receiver = Receiver(net=Net(nout=1))
+    receiver = Receiver(net=EmbedNet(nout=1))
     opt_s = optim.SGD(sender.parameters(), lr=args.lr, momentum=args.momentum)
     opt_r = optim.SGD(receiver.parameters(), lr=args.lr, momentum=args.momentum)
 
