@@ -19,8 +19,7 @@ class Game(object):
         self.opt_r = opt_r
 
     def step(self, samples, labels):
-        yval = self.sender(samples[:, 0])
-        y = torch.multinomial(F.softmax(yval, dim=1), 1).view(-1)
+        yval, y = self.sender(samples[:, 0], labels[:, 0])
         scores = self.receiver(samples, y)
 
         self.opt_s.zero_grad()
@@ -34,9 +33,10 @@ class Game(object):
         loss += lossfn(scores, target)
 
         # rl loss
-        reward = (scores.argmax(dim=1) == 0).float()
-        p = F.log_softmax(yval, dim=1)[range(y.shape[0]), y]
-        loss += (reward * p).mean()
+        if self.sender.rl:
+            reward = (scores.argmax(dim=1) == 0).float()
+            p = F.log_softmax(yval, dim=1)[range(y.shape[0]), y]
+            loss += (reward * p).mean()
 
         loss.backward()
 
@@ -52,12 +52,17 @@ class Game(object):
 
 
 class Sender(nn.Module):
-    def __init__(self, net):
+    def __init__(self, net, rl=True):
         super(Sender, self).__init__()
         self.net = net
+        self.rl = rl
 
-    def forward(self, positive):
-        return self.net(positive)
+    def forward(self, x, y):
+        if self.rl:
+            out = self.net(x)
+            y = torch.multinomial(F.softmax(out, dim=1), 1).view(-1)
+            return out, y
+        return None, y
 
 
 class Receiver(nn.Module):
@@ -207,6 +212,8 @@ def main():
                         help='learning rate (default: 0.01)')
     parser.add_argument('--momentum', type=float, default=0.5, metavar='M',
                         help='SGD momentum (default: 0.5)')
+    parser.add_argument('--rl', action='store_true',
+                        help='enables sampled sender labels')
     parser.add_argument('--no-cuda', action='store_true', default=False,
                         help='disables CUDA training')
     parser.add_argument('--seed', type=int, default=1, metavar='S',
