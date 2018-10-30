@@ -9,6 +9,8 @@ import torch.optim as optim
 import numpy as np
 from torchvision import datasets, transforms
 
+from sklearn.metrics import confusion_matrix
+
 from tqdm import tqdm
 
 
@@ -81,7 +83,14 @@ class Game(object):
 
         acc = (scores.argmax(dim=1) == 0).float().mean()
 
-        return loss.item(), acc.item()
+        batch_size = scores.shape[0]
+        index = torch.arange(batch_size)
+        dist = scores.clone()
+        dist[index, 0] = scores[index, labels[:, 0]]
+        dist[index, labels[:, 0]] = scores[index, 0]
+        preds = dist.argmax(dim=1)
+
+        return loss.item(), acc.item(), preds
 
 
 class Sender(nn.Module):
@@ -236,14 +245,20 @@ def wrap(loader_positive, loader_negative, k_neg=3, verbose=False, limit=None):
 def train_game(args, sender, receiver, baseline, opt_s, opt_r, opt_b, device, loader_positive, loader_negative, epoch):
     game = Game(args, sender, receiver, baseline, opt_s, opt_r, opt_b)
 
+    conf = np.zeros((10, 10))
+
     arrloss, arracc = [], []
     for samples, labels in wrap(loader_positive, loader_negative, k_neg=args.k_neg, limit=args.limit, verbose=True):
-        loss, acc = game.step(samples, labels)
+        loss, acc, preds = game.step(samples, labels)
         arrloss.append(loss)
         arracc.append(acc)
+        conf += confusion_matrix(labels[:, 0].tolist(), preds.tolist())
 
     print('loss', np.array(arrloss).mean())
     print('acc', np.array(arracc).mean())
+
+    np.set_printoptions(precision=2, suppress=True)
+    print('conf', conf)
 
 
 def main():
