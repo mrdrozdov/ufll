@@ -103,11 +103,11 @@ class Game(object):
         batch_size = scores.shape[0]
         index = torch.arange(batch_size)
         dist = scores.clone()
-        dist[index, 0] = scores[index, labels[:, 0]]
-        dist[index, labels[:, 0]] = scores[index, 0]
+        dist[index, 0] = scores[index, y]
+        dist[index, y] = scores[index, 0]
         preds = dist.argmax(dim=1)
 
-        return loss.item(), acc.item(), preds
+        return loss.item(), acc.item(), y, preds
 
 
 class Sender(nn.Module):
@@ -263,6 +263,15 @@ def wrap(loader_positive, loader_negative, k_neg=3, verbose=False, limit=None):
             break
 
 
+def save_examples(args, sender, loader, epoch):
+    sender.eval()
+    batch_iterator = iter(loader)
+    batch, labels = next(batch_iterator)
+    _, y = sender(batch, labels)
+    import ipdb; ipdb.set_trace()
+    pass
+
+
 def train_game(args, sender, receiver, baseline, opt_s, opt_r, opt_b, device, loader_positive, loader_negative, epoch, train=True):
     game = Game(args, sender, receiver, baseline, opt_s, opt_r, opt_b, train=train)
 
@@ -270,10 +279,11 @@ def train_game(args, sender, receiver, baseline, opt_s, opt_r, opt_b, device, lo
 
     arrloss, arracc = [], []
     for samples, labels in wrap(loader_positive, loader_negative, k_neg=args.k_neg, limit=args.limit, verbose=True):
-        loss, acc, preds = game.step(samples, labels)
+        loss, acc, y, preds = game.step(samples, labels)
         arrloss.append(loss)
         arracc.append(acc)
-        conf += confusion_matrix(labels[:, 0].tolist(), preds.tolist())
+        assert y.shape == preds.shape
+        conf += confusion_matrix(y.tolist(), preds.tolist(), labels=list(range(10)))
 
     print('loss', np.array(arrloss).mean())
     print('acc', np.array(arracc).mean())
@@ -349,6 +359,7 @@ def main():
     for epoch in range(1, args.epochs + 1):
         train_game(args, sender, receiver, baseline, opt_s, opt_r, opt_b, device, train_loader, train_loader, epoch)
         train_game(args, sender, receiver, baseline, opt_s, opt_r, opt_b, device, test_loader, train_loader, epoch, train=False)
+        # save_examples(args, sender, test_loader, epoch)
 
 
 if __name__ == '__main__':
