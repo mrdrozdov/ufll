@@ -21,14 +21,20 @@ def get_yn(y):
 
 
 class Game(object):
-    def __init__(self, args, sender, receiver, opt_s, opt_r):
+    def __init__(self, args, sender, receiver, baseline, opt_s, opt_r, opt_b):
         self.sender = sender
         self.receiver = receiver
+        self.baseline = baseline
         self.opt_s = opt_s
         self.opt_r = opt_r
+        self.opt_b = opt_b
         self.args = args
 
     def step(self, samples, labels):
+        if self.sender.use_cuda:
+            samples = samples.cuda()
+            labels = labels.cuda()
+
         yval, y = self.sender(samples[:, 0], labels[:, 0])
         yn = get_yn(y)
         scores = self.receiver(samples, y, yn)
@@ -43,21 +49,35 @@ class Game(object):
         if self.sender.use_cuda:
             target = target.cuda()
         lossfn = nn.MultiMarginLoss(margin=self.args.margin)
-        loss += lossfn(scores, target)
+        xent_loss = lossfn(scores, target)
+        xent_loss.backward()
+        loss += xent_loss
 
         # rl loss
         if self.sender.rl:
-            reward = (scores.argmax(dim=1) == 0).float()
-            p = F.log_softmax(yval, dim=1)[range(y.shape[0]), y]
-            loss += (reward * p).mean()
+            self.opt_b.zero_grad()
 
-        loss.backward()
+            # reward
+            reward = (scores.argmax(dim=1) == 0).float()
+            exprew = self.baseline(samples[:, 0]).view(*reward.shape)
+            advantage = reward - exprew.detach()
+            p = F.log_softmax(yval, dim=1)[range(y.shape[0]), y]
+            rl_loss = (advantage * p).mean()
+            rl_loss.backward()
+            loss += rl_loss
+
+            # baseline
+            bas_loss = nn.MSELoss()(exprew, reward)
+            bas_loss.backward()
+            loss += bas_loss
 
         torch.nn.utils.clip_grad_norm_(self.sender.parameters(), 5.0)
         torch.nn.utils.clip_grad_norm_(self.receiver.parameters(), 5.0)
+        torch.nn.utils.clip_grad_norm_(self.baseline.parameters(), 5.0)
 
         self.opt_s.step()
         self.opt_r.step()
+        self.opt_b.step()
 
         acc = (scores.argmax(dim=1) == 0).float().mean()
 
@@ -213,8 +233,8 @@ def wrap(loader_positive, loader_negative, k_neg=3, verbose=False, limit=None):
             break
 
 
-def train_game(args, sender, receiver, opt_s, opt_r, device, loader_positive, loader_negative, epoch):
-    game = Game(args, sender, receiver, opt_s, opt_r)
+def train_game(args, sender, receiver, baseline, opt_s, opt_r, opt_b, device, loader_positive, loader_negative, epoch):
+    game = Game(args, sender, receiver, baseline, opt_s, opt_r, opt_b)
 
     arrloss, arracc = [], []
     for samples, labels in wrap(loader_positive, loader_negative, k_neg=args.k_neg, limit=args.limit, verbose=True):
@@ -282,13 +302,16 @@ def main():
 
     sender = Sender(net=Net(nout=10).to(device), rl=args.rl).to(device)
     receiver = Receiver(net=EmbedNet(nout=1).to(device)).to(device)
+    baseline = Net(nout=1).to(device)
     sender.use_cuda = use_cuda
     receiver.use_cuda = use_cuda
+    baseline.use_cuda = use_cuda
     opt_s = optim.Adam(sender.parameters(), lr=args.lr)
     opt_r = optim.Adam(receiver.parameters(), lr=args.lr)
+    opt_b = optim.Adam(baseline.parameters(), lr=args.lr)
 
     for epoch in range(1, args.epochs + 1):
-        train_game(args, sender, receiver, opt_s, opt_r, device, train_loader, train_loader, epoch)
+        train_game(args, sender, receiver, baseline, opt_s, opt_r, opt_b, device, train_loader, train_loader, epoch)
 
 
 if __name__ == '__main__':
