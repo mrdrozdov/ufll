@@ -1,5 +1,6 @@
 from __future__ import print_function
 import sys
+import json
 import argparse
 import torch
 import torch.nn as nn
@@ -164,14 +165,12 @@ def forever(loader):
             yield x
 
 
-def wrap(loader_positive, loader_negative, k_neg=3):
-    bi_pos = iter(loader_positive)
+def wrap(loader_positive, loader_negative, k_neg=3, verbose=False, limit=None):
     bi_neg = forever(loader_negative)
 
-    while True:
+    for i, (x_pos, y_pos) in tqdm(enumerate(loader_positive), disable=not verbose):
         samples = []
         labels = []
-        x_pos, y_pos = next(bi_pos)
         samples.append(x_pos.unsqueeze(1))
         labels.append(y_pos.unsqueeze(1))
         for _ in range(k_neg):
@@ -183,12 +182,15 @@ def wrap(loader_positive, loader_negative, k_neg=3):
 
         yield samples, labels
 
+        if i >= limit:
+            break
+
 
 def train_game(args, sender, receiver, opt_s, opt_r, device, loader_positive, loader_negative, epoch):
     game = Game(sender, receiver, opt_s, opt_r)
 
     arrloss, arracc = [], []
-    for samples, labels in tqdm(wrap(loader_positive, loader_negative, k_neg=args.k_neg)):
+    for samples, labels in wrap(loader_positive, loader_negative, k_neg=args.k_neg, limit=100, verbose=True):
         loss, acc = game.step(samples, labels)
         arrloss.append(loss)
         arracc.append(acc)
@@ -223,6 +225,8 @@ def main():
     args = parser.parse_args()
     use_cuda = not args.no_cuda and torch.cuda.is_available()
 
+    print(json.dumps(args.__dict__, sort_keys=True, indent=4))
+
     torch.manual_seed(args.seed)
 
     device = torch.device("cuda" if use_cuda else "cpu")
@@ -249,8 +253,8 @@ def main():
 
     sender = Sender(net=Net(nout=10))
     receiver = Receiver(net=EmbedNet(nout=1))
-    opt_s = optim.SGD(sender.parameters(), lr=args.lr, momentum=args.momentum)
-    opt_r = optim.SGD(receiver.parameters(), lr=args.lr, momentum=args.momentum)
+    opt_s = optim.Adam(sender.parameters(), lr=args.lr)
+    opt_r = optim.Adam(receiver.parameters(), lr=args.lr)
 
     for epoch in range(1, args.epochs + 1):
         train_game(args, sender, receiver, opt_s, opt_r, device, train_loader, train_loader, epoch)
