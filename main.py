@@ -23,7 +23,7 @@ def get_yn(y):
 
 
 class Game(object):
-    def __init__(self, args, sender, receiver, baseline, opt_s, opt_r, opt_b):
+    def __init__(self, args, sender, receiver, baseline, opt_s, opt_r, opt_b, train=True):
         self.sender = sender
         self.receiver = receiver
         self.baseline = baseline
@@ -31,8 +31,21 @@ class Game(object):
         self.opt_r = opt_r
         self.opt_b = opt_b
         self.args = args
+        self.train = train
+
+        if train:
+            self.sender.train()
+            self.receiver.train()
+        else:
+            self.sender.eval()
+            self.receiver.eval()
 
     def step(self, samples, labels):
+        with torch.set_grad_enabled(self.train):
+            out = self._step(samples, labels)
+        return out
+
+    def _step(self, samples, labels):
         if self.sender.use_cuda:
             samples = samples.cuda()
             labels = labels.cuda()
@@ -44,19 +57,22 @@ class Game(object):
         self.opt_s.zero_grad()
         self.opt_r.zero_grad()
 
-        loss = 0
+        loss = torch.FloatTensor([0])
+        if self.sender.use_cuda:
+            loss = loss.cuda()
 
         # xent loss
-        target = torch.LongTensor([0]).view(1).expand(scores.shape[0])
-        if self.sender.use_cuda:
-            target = target.cuda()
-        lossfn = nn.MultiMarginLoss(margin=self.args.margin)
-        y_loss = lossfn(scores, target)
-        y_loss.backward()
-        loss += y_loss
+        if self.train:
+            target = torch.LongTensor([0]).view(1).expand(scores.shape[0])
+            if self.sender.use_cuda:
+                target = target.cuda()
+            lossfn = nn.MultiMarginLoss(margin=self.args.margin)
+            y_loss = lossfn(scores, target)
+            y_loss.backward()
+            loss += y_loss
 
         # rl loss
-        if self.sender.rl:
+        if self.sender.rl and self.train:
             self.opt_b.zero_grad()
 
             # reward
@@ -73,13 +89,14 @@ class Game(object):
             bas_loss.backward()
             loss += bas_loss
 
-        torch.nn.utils.clip_grad_norm_(self.sender.parameters(), max_norm=1.0)
-        torch.nn.utils.clip_grad_norm_(self.receiver.parameters(), max_norm=1.0)
-        torch.nn.utils.clip_grad_norm_(self.baseline.parameters(), max_norm=1.0)
+        if self.train:
+            torch.nn.utils.clip_grad_norm_(self.sender.parameters(), max_norm=1.0)
+            torch.nn.utils.clip_grad_norm_(self.receiver.parameters(), max_norm=1.0)
+            torch.nn.utils.clip_grad_norm_(self.baseline.parameters(), max_norm=1.0)
 
-        self.opt_s.step()
-        self.opt_r.step()
-        self.opt_b.step()
+            self.opt_s.step()
+            self.opt_r.step()
+            self.opt_b.step()
 
         acc = (scores.argmax(dim=1) == 0).float().mean()
 
@@ -105,7 +122,11 @@ class Sender(nn.Module):
             y = y.cuda()
         if self.rl:
             out = self.net(x)
-            y = torch.multinomial(F.softmax(out, dim=1), 1).view(-1)
+            p = F.softmax(out, dim=1)
+            if self.training:
+                y = torch.multinomial(p, 1).view(-1)
+            else:
+                y = p.argmax(dim=1)
             return out, y
         return None, y
 
@@ -242,8 +263,8 @@ def wrap(loader_positive, loader_negative, k_neg=3, verbose=False, limit=None):
             break
 
 
-def train_game(args, sender, receiver, baseline, opt_s, opt_r, opt_b, device, loader_positive, loader_negative, epoch):
-    game = Game(args, sender, receiver, baseline, opt_s, opt_r, opt_b)
+def train_game(args, sender, receiver, baseline, opt_s, opt_r, opt_b, device, loader_positive, loader_negative, epoch, train=True):
+    game = Game(args, sender, receiver, baseline, opt_s, opt_r, opt_b, train=train)
 
     conf = np.zeros((10, 10))
 
@@ -327,6 +348,7 @@ def main():
 
     for epoch in range(1, args.epochs + 1):
         train_game(args, sender, receiver, baseline, opt_s, opt_r, opt_b, device, train_loader, train_loader, epoch)
+        train_game(args, sender, receiver, baseline, opt_s, opt_r, opt_b, device, test_loader, train_loader, epoch, train=False)
 
 
 if __name__ == '__main__':
