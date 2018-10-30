@@ -19,15 +19,25 @@ class Game(object):
         self.opt_r = opt_r
 
     def step(self, samples):
-        y = self.sender(samples[:, 0])
+        yval = self.sender(samples[:, 0])
+        y = torch.multinomial(F.softmax(yval, dim=1), 1).view(-1)
         scores = self.receiver(samples, y)
 
         self.opt_s.zero_grad()
         self.opt_r.zero_grad()
 
+        loss = 0
+
+        # xent loss
         target = torch.LongTensor([0]).view(1).expand(scores.shape[0])
         lossfn = nn.MultiMarginLoss(margin=1)
-        loss = lossfn(scores, target)
+        loss += lossfn(scores, target)
+
+        # rl loss
+        reward = (scores.argmax(dim=1) == 0).float()
+        p = F.log_softmax(yval, dim=1)[range(y.shape[0]), y]
+        loss += (reward * p).mean()
+
         loss.backward()
 
         torch.nn.utils.clip_grad_norm_(self.sender.parameters(), 5.0)
@@ -36,16 +46,18 @@ class Game(object):
         self.opt_s.step()
         self.opt_r.step()
 
-        return loss.item()
+        acc = (scores.argmax(dim=1) == 0).float().mean()
+
+        return loss.item(), acc.item()
 
 
 class Sender(nn.Module):
-    def __init__(self):
+    def __init__(self, net):
         super(Sender, self).__init__()
-        self.net = Net(nout=1) # unused for now
+        self.net = net
 
     def forward(self, positive):
-        return torch.randint(0, 10, size=(positive.shape[0],)).long()
+        return self.net(positive)
 
 
 class Receiver(nn.Module):
@@ -159,12 +171,14 @@ def wrap(loader, kneg=3):
 def train_game(args, sender, receiver, opt_s, opt_r, device, loader, epoch):
     game = Game(sender, receiver, opt_s, opt_r)
 
-    losses = []
+    arrloss, arracc = [], []
     for samples in tqdm(wrap(loader)):
-        loss = game.step(samples)
-        losses.append(loss)
+        loss, acc = game.step(samples)
+        arrloss.append(loss)
+        arracc.append(acc)
 
-    print('loss', np.array(losses).mean())
+    print('loss', np.array(arrloss).mean())
+    print('acc', np.array(arracc).mean())
 
 
 def main():
@@ -213,7 +227,7 @@ def main():
     # optimizer = optim.SGD(model.parameters(), lr=args.lr, momentum=args.momentum)
 
 
-    sender = Sender()
+    sender = Sender(net=Net(nout=10))
     receiver = Receiver(net=EmbedNet(nout=1))
     opt_s = optim.SGD(sender.parameters(), lr=args.lr, momentum=args.momentum)
     opt_r = optim.SGD(receiver.parameters(), lr=args.lr, momentum=args.momentum)
