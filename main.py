@@ -12,16 +12,26 @@ from torchvision import datasets, transforms
 from tqdm import tqdm
 
 
+def get_yn(y):
+    ys = torch.arange(10)
+    ys = ys.view(1, -1).expand(y.shape[0], 10).contiguous()
+    ys[:, 0] = y
+    ys[range(y.shape[0]), y] = 0
+    return ys[:, 1:]
+
+
 class Game(object):
-    def __init__(self, sender, receiver, opt_s, opt_r):
+    def __init__(self, args, sender, receiver, opt_s, opt_r):
         self.sender = sender
         self.receiver = receiver
         self.opt_s = opt_s
         self.opt_r = opt_r
+        self.args = args
 
     def step(self, samples, labels):
         yval, y = self.sender(samples[:, 0], labels[:, 0])
-        scores = self.receiver(samples, y)
+        yn = get_yn(y)
+        scores = self.receiver(samples, y, yn)
 
         self.opt_s.zero_grad()
         self.opt_r.zero_grad()
@@ -30,7 +40,9 @@ class Game(object):
 
         # xent loss
         target = torch.LongTensor([0]).view(1).expand(scores.shape[0])
-        lossfn = nn.MultiMarginLoss(margin=1)
+        if self.sender.use_cuda:
+            target = target.cuda()
+        lossfn = nn.MultiMarginLoss(margin=self.args.margin)
         loss += lossfn(scores, target)
 
         # rl loss
@@ -59,6 +71,9 @@ class Sender(nn.Module):
         self.rl = rl
 
     def forward(self, x, y):
+        if self.use_cuda:
+            x = x.cuda()
+            y = y.cuda()
         if self.rl:
             out = self.net(x)
             y = torch.multinomial(F.softmax(out, dim=1), 1).view(-1)
@@ -71,39 +86,51 @@ class Receiver(nn.Module):
         super(Receiver, self).__init__()
         self.net = net
 
-    def forward(self, samples, labels):
-        nsamples = samples.shape[1]
+    def forward(self, samples, labels, negs):
         samples = samples.view(-1, *samples.shape[2:])
-        logit = self.net(samples, labels)
-        ydist = logit.view(-1, nsamples)
-        return ydist
+        if self.use_cuda:
+            samples = samples.cuda()
+            labels = labels.cuda()
+            negs = negs.cuda()
+        scores = self.net(samples, labels, negs)
+        return scores
 
 
 class EmbedNet(nn.Module):
-    def __init__(self, nout, embed_dim=50):
+    def __init__(self, nout, embed_dim=20, out_dim=20):
         super(EmbedNet, self).__init__()
+
         self.conv1 = nn.Conv2d(1, 10, kernel_size=5)
         self.conv2 = nn.Conv2d(10, 20, kernel_size=5)
         self.conv2_drop = nn.Dropout2d()
         self.fc1 = nn.Linear(320, 50)
-        self.fc2 = nn.Linear(50 + embed_dim, nout)
+        self.fc2 = nn.Linear(50, out_dim)
         self.embed = nn.Embedding(10, embed_dim)
+
+        self.out_dim = out_dim
+        self.embed_dim = embed_dim
+
+        self.mat = nn.Parameter(torch.FloatTensor(embed_dim, out_dim))
+        self.mat.data.normal_()
 
         self.nout = nout
 
-    def forward(self, x, y):
+    def forward(self, x, y, yn):
         x = F.relu(F.max_pool2d(self.conv1(x), 2))
         x = F.relu(F.max_pool2d(self.conv2_drop(self.conv2(x)), 2))
         x = x.view(-1, 320)
         x = self.fc1(x)
-        e = self.embed(y)
-        # TODO: Remove contiguous. Be more clever.
-        e = e.unsqueeze(1).expand(e.shape[0], x.shape[0]//e.shape[0], e.shape[1]).contiguous().view(x.shape[0], -1)
-        x = torch.cat([x, e], 1)
-        x = F.relu(x)
         x = F.dropout(x, training=self.training)
         x = self.fc2(x)
-        return x
+
+        pos = self.embed(y).unsqueeze(1)
+        neg = self.embed(yn)
+        q = torch.cat([pos, neg], 1)
+        qh = torch.mm(q.view(-1, self.embed_dim), self.mat).view(q.shape[0], q.shape[1], self.out_dim)
+
+        scores = torch.sum(qh * x.unsqueeze(1), dim=2)
+
+        return scores
 
 
 class Net(nn.Module):
@@ -182,15 +209,15 @@ def wrap(loader_positive, loader_negative, k_neg=3, verbose=False, limit=None):
 
         yield samples, labels
 
-        if i >= limit:
+        if limit is not None and i >= limit:
             break
 
 
 def train_game(args, sender, receiver, opt_s, opt_r, device, loader_positive, loader_negative, epoch):
-    game = Game(sender, receiver, opt_s, opt_r)
+    game = Game(args, sender, receiver, opt_s, opt_r)
 
     arrloss, arracc = [], []
-    for samples, labels in wrap(loader_positive, loader_negative, k_neg=args.k_neg, limit=100, verbose=True):
+    for samples, labels in wrap(loader_positive, loader_negative, k_neg=args.k_neg, limit=args.limit, verbose=True):
         loss, acc = game.step(samples, labels)
         arrloss.append(loss)
         arracc.append(acc)
@@ -202,7 +229,7 @@ def train_game(args, sender, receiver, opt_s, opt_r, device, loader_positive, lo
 def main():
     # Training settings
     parser = argparse.ArgumentParser(description='PyTorch MNIST Example')
-    parser.add_argument('--batch-size', type=int, default=64, metavar='N',
+    parser.add_argument('--batch-size', type=int, default=128, metavar='N',
                         help='input batch size for training (default: 64)')
     parser.add_argument('--test-batch-size', type=int, default=1000, metavar='N',
                         help='input batch size for testing (default: 1000)')
@@ -220,6 +247,8 @@ def main():
                         help='disables CUDA training')
     parser.add_argument('--seed', type=int, default=1, metavar='S',
                         help='random seed (default: 1)')
+    parser.add_argument('--margin', type=float, default=0.1)
+    parser.add_argument('--limit', type=int, default=None)
     parser.add_argument('--log-interval', type=int, default=10, metavar='N',
                         help='how many batches to wait before logging training status')
     args = parser.parse_args()
@@ -251,8 +280,10 @@ def main():
     # optimizer = optim.SGD(model.parameters(), lr=args.lr, momentum=args.momentum)
 
 
-    sender = Sender(net=Net(nout=10))
-    receiver = Receiver(net=EmbedNet(nout=1))
+    sender = Sender(net=Net(nout=10).to(device), rl=args.rl).to(device)
+    receiver = Receiver(net=EmbedNet(nout=1).to(device)).to(device)
+    sender.use_cuda = use_cuda
+    receiver.use_cuda = use_cuda
     opt_s = optim.Adam(sender.parameters(), lr=args.lr)
     opt_r = optim.Adam(receiver.parameters(), lr=args.lr)
 
