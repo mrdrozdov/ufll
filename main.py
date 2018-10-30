@@ -159,7 +159,7 @@ def forever(loader):
             yield x
 
 
-def wrap(loader_positive, loader_negative, kneg=3):
+def wrap(loader_positive, loader_negative, k_neg=3):
     bi_pos = iter(loader_positive)
     bi_neg = forever(loader_negative)
 
@@ -167,7 +167,7 @@ def wrap(loader_positive, loader_negative, kneg=3):
         samples = []
         positive = next(bi_pos)[0]
         samples.append(positive.unsqueeze(1))
-        for _ in range(kneg):
+        for _ in range(k_neg):
             negative = next(bi_neg)[0]
             samples.append(negative.unsqueeze(1))
         samples = torch.cat(samples, 1)
@@ -179,7 +179,7 @@ def train_game(args, sender, receiver, opt_s, opt_r, device, loader_positive, lo
     game = Game(sender, receiver, opt_s, opt_r)
 
     arrloss, arracc = [], []
-    for samples in tqdm(wrap(loader_positive, loader_negative)):
+    for samples in tqdm(wrap(loader_positive, loader_negative, k_neg=args.k_neg)):
         loss, acc = game.step(samples)
         arrloss.append(loss)
         arracc.append(acc)
@@ -195,6 +195,8 @@ def main():
                         help='input batch size for training (default: 64)')
     parser.add_argument('--test-batch-size', type=int, default=1000, metavar='N',
                         help='input batch size for testing (default: 1000)')
+    parser.add_argument('--k_neg', type=int, default=3,
+                        help='number of negative examples for training (default: 3)')
     parser.add_argument('--epochs', type=int, default=10, metavar='N',
                         help='number of epochs to train (default: 10)')
     parser.add_argument('--lr', type=float, default=0.01, metavar='LR',
