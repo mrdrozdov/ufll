@@ -49,31 +49,31 @@ class Game(object):
         if self.sender.use_cuda:
             target = target.cuda()
         lossfn = nn.MultiMarginLoss(margin=self.args.margin)
-        xent_loss = lossfn(scores, target)
-        xent_loss.backward()
-        loss += xent_loss
+        y_loss = lossfn(scores, target)
+        y_loss.backward()
+        loss += y_loss
 
         # rl loss
         if self.sender.rl:
             self.opt_b.zero_grad()
 
             # reward
-            reward = (scores.argmax(dim=1) == 0).float()
-            exprew = self.baseline(samples[:, 0]).view(*reward.shape)
-            advantage = reward - exprew.detach()
-            p = F.log_softmax(yval, dim=1)[range(y.shape[0]), y]
-            rl_loss = (advantage * p).mean()
+            # correct = (scores.argmax(dim=1) == 0).float()
+            logp = F.log_softmax(yval, dim=1)[range(y.shape[0]), y]
+            exp_logp = self.baseline(samples[:, 0]).view(*logp.shape)
+            weight = logp - exp_logp.detach()
+            rl_loss = -torch.mean(weight * logp)
             rl_loss.backward()
             loss += rl_loss
 
             # baseline
-            bas_loss = nn.MSELoss()(exprew, reward)
+            bas_loss = nn.MSELoss()(exp_logp, logp.detach())
             bas_loss.backward()
             loss += bas_loss
 
-        torch.nn.utils.clip_grad_norm_(self.sender.parameters(), 5.0)
-        torch.nn.utils.clip_grad_norm_(self.receiver.parameters(), 5.0)
-        torch.nn.utils.clip_grad_norm_(self.baseline.parameters(), 5.0)
+        torch.nn.utils.clip_grad_norm_(self.sender.parameters(), max_norm=1.0)
+        torch.nn.utils.clip_grad_norm_(self.receiver.parameters(), max_norm=1.0)
+        torch.nn.utils.clip_grad_norm_(self.baseline.parameters(), max_norm=1.0)
 
         self.opt_s.step()
         self.opt_r.step()
