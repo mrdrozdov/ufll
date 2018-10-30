@@ -77,10 +77,15 @@ class Game(object):
 
             # reward
             # correct = (scores.argmax(dim=1) == 0).float()
+            p = F.softmax(yval, dim=1)[range(y.shape[0]), y]
             logp = F.log_softmax(yval, dim=1)[range(y.shape[0]), y]
             exp_logp = self.baseline(samples[:, 0]).view(*logp.shape)
             weight = logp - exp_logp.detach()
             rl_loss = -torch.mean(weight * logp)
+
+            # entropy
+            negent = torch.mean(logp * p)
+            rl_loss += negent * self.args.lambda_rl
             rl_loss.backward()
             loss += rl_loss
 
@@ -314,6 +319,7 @@ def main():
     parser.add_argument('--seed', type=int, default=1, metavar='S',
                         help='random seed (default: 1)')
     parser.add_argument('--margin', type=float, default=0.1)
+    parser.add_argument('--lambda_rl', type=float, default=0.08)
     parser.add_argument('--limit', type=int, default=None)
     parser.add_argument('--log-interval', type=int, default=10, metavar='N',
                         help='how many batches to wait before logging training status')
