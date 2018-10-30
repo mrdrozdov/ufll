@@ -18,7 +18,7 @@ class Game(object):
         self.opt_s = opt_s
         self.opt_r = opt_r
 
-    def step(self, samples):
+    def step(self, samples, labels):
         yval = self.sender(samples[:, 0])
         y = torch.multinomial(F.softmax(yval, dim=1), 1).view(-1)
         scores = self.receiver(samples, y)
@@ -165,22 +165,26 @@ def wrap(loader_positive, loader_negative, k_neg=3):
 
     while True:
         samples = []
-        positive = next(bi_pos)[0]
-        samples.append(positive.unsqueeze(1))
+        labels = []
+        x_pos, y_pos = next(bi_pos)
+        samples.append(x_pos.unsqueeze(1))
+        labels.append(y_pos.unsqueeze(1))
         for _ in range(k_neg):
-            negative = next(bi_neg)[0]
-            samples.append(negative.unsqueeze(1))
+            x_neg, y_neg = next(bi_neg)
+            samples.append(x_neg.unsqueeze(1))
+            labels.append(y_neg.unsqueeze(1))
         samples = torch.cat(samples, 1)
+        labels = torch.cat(labels, 1)
 
-        yield samples
+        yield samples, labels
 
 
 def train_game(args, sender, receiver, opt_s, opt_r, device, loader_positive, loader_negative, epoch):
     game = Game(sender, receiver, opt_s, opt_r)
 
     arrloss, arracc = [], []
-    for samples in tqdm(wrap(loader_positive, loader_negative, k_neg=args.k_neg)):
-        loss, acc = game.step(samples)
+    for samples, labels in tqdm(wrap(loader_positive, loader_negative, k_neg=args.k_neg)):
+        loss, acc = game.step(samples, labels)
         arrloss.append(loss)
         arracc.append(acc)
 
