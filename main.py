@@ -153,26 +153,33 @@ def test(args, model, device, test_loader):
         100. * correct / len(test_loader.dataset)))
 
 
-def wrap(loader, kneg=3):
-    batch_iterator = iter(loader)
+def forever(loader):
+    while True:
+        for x in loader:
+            yield x
+
+
+def wrap(loader_positive, loader_negative, kneg=3):
+    bi_pos = iter(loader_positive)
+    bi_neg = forever(loader_negative)
 
     while True:
         samples = []
-        positive = next(batch_iterator)[0]
+        positive = next(bi_pos)[0]
         samples.append(positive.unsqueeze(1))
         for _ in range(kneg):
-            negative = next(batch_iterator)[0]
+            negative = next(bi_neg)[0]
             samples.append(negative.unsqueeze(1))
         samples = torch.cat(samples, 1)
 
         yield samples
 
 
-def train_game(args, sender, receiver, opt_s, opt_r, device, loader, epoch):
+def train_game(args, sender, receiver, opt_s, opt_r, device, loader_positive, loader_negative, epoch):
     game = Game(sender, receiver, opt_s, opt_r)
 
     arrloss, arracc = [], []
-    for samples in tqdm(wrap(loader)):
+    for samples in tqdm(wrap(loader_positive, loader_negative)):
         loss, acc = game.step(samples)
         arrloss.append(loss)
         arracc.append(acc)
@@ -233,7 +240,7 @@ def main():
     opt_r = optim.SGD(receiver.parameters(), lr=args.lr, momentum=args.momentum)
 
     for epoch in range(1, args.epochs + 1):
-        train_game(args, sender, receiver, opt_s, opt_r, device, train_loader, epoch)
+        train_game(args, sender, receiver, opt_s, opt_r, device, train_loader, train_loader, epoch)
 
 
 if __name__ == '__main__':
